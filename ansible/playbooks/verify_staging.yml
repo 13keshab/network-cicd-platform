@@ -1,0 +1,56 @@
+
+---
+- name: Read-only pre-deployment verification for staging
+  hosts: staging
+  gather_facts: false
+
+  tasks:
+    - name: Collect device version
+      cisco.ios.ios_command:
+        commands:
+          - show version
+      register: version_output
+
+    - name: Display device version
+      ansible.builtin.debug:
+        var: version_output.stdout_lines
+
+    - name: Read current hostname
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | include ^hostname
+      register: hostname_output
+
+    - name: Verify expected hostname
+      ansible.builtin.assert:
+        that:
+          - "'hostname R2' in hostname_output.stdout[0]"
+        fail_msg: "Preflight failed: expected hostname R2."
+        success_msg: "Hostname check passed: R2."
+
+    - name: Collect interface status
+      cisco.ios.ios_command:
+        commands:
+          - show ip interface brief
+      register: interface_output
+
+    - name: Display interface status
+      ansible.builtin.debug:
+        var: interface_output.stdout_lines
+
+    - name: Verify staging interface IP and operational state
+      ansible.builtin.assert:
+        that:
+          - "'GigabitEthernet1/0' in interface_output.stdout[0]"
+          - "'10.10.12.2' in interface_output.stdout[0]"
+          - "'up                    up' in interface_output.stdout[0]"
+        fail_msg: >-
+          Preflight failed: GigabitEthernet1/0 must have IP 10.10.12.2
+          and be operationally up/up. Review the interface output.
+        success_msg: >-
+          Interface check passed: GigabitEthernet1/0 is up/up
+          with IP 10.10.12.2.
+
+    - name: Report successful staging preflight
+      ansible.builtin.debug:
+        msg: "STAGING PREFLIGHT PASSED. No configuration was changed."

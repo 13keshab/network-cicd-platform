@@ -1,0 +1,40 @@
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets and local environment settings
+.env
+.env.*
+!.env.example
+vault.yml
+vault.yaml
+*.pem
+*.key
+
+# Logs and temporary files
+logs/*
+!logs/.gitkeep
+*.log
+*.tmp
+
+# Backups and generated reports
+backups/*
+reports/*
+generated/*
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Backup files
+*.bak
