@@ -1,0 +1,45 @@
+
+---
+- name: Capture staging router configuration before deployment
+  hosts: staging
+  gather_facts: false
+
+  tasks:
+    - name: Verify router identity
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | include ^hostname
+      register: hostname_output
+
+    - name: Stop if the staging router identity is unexpected
+      ansible.builtin.assert:
+        that:
+          - "'hostname R2' in hostname_output.stdout[0]"
+        fail_msg: "Backup aborted: connected device is not identified as R2."
+        success_msg: "Router identity verified: R2."
+
+    - name: Capture current running configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config
+      register: running_config
+
+    - name: Create local staging backup directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../../backups/staging"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Save running configuration to a local backup file
+      ansible.builtin.copy:
+        content: "{{ running_config.stdout[0] }}\n"
+        dest: "{{ playbook_dir }}/../../backups/staging/R2-running-config.cfg"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Report backup completion
+      ansible.builtin.debug:
+        msg: >-
+          R2 running configuration captured locally.
+          No router configuration was changed.

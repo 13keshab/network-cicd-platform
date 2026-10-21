@@ -1,0 +1,52 @@
+
+---
+- name: Capture production router configuration before deployment
+  hosts: production
+  gather_facts: false
+
+  tasks:
+    - name: Verify production router identity
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | include ^hostname
+      register: hostname_output
+
+    - name: Stop if the router is not R3
+      ansible.builtin.assert:
+        that:
+          - "'hostname R3' in hostname_output.stdout[0]"
+        fail_msg: "Backup aborted: connected device is not identified as R3."
+        success_msg: "Production router identity verified: R3."
+
+    - name: Capture current running configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config
+      register: running_config
+
+    - name: Create local production backup directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../../backups/production"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      
+    - name: Create local production backup directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../../backups/production"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      
+    - name: Save production configuration locally
+      ansible.builtin.copy:
+        content: "{{ running_config.stdout[0] }}\n"
+        dest: "{{ playbook_dir }}/../../backups/production/R3-running-config.cfg"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Report backup completion
+      ansible.builtin.debug:
+        msg: >-
+          R3 running configuration captured locally.
+          No router configuration was changed.

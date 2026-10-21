@@ -1,0 +1,52 @@
+
+---
+- name: Deploy approved desired configuration to production
+  hosts: production
+  gather_facts: false
+
+  tasks:
+    - name: Verify target is the expected production router
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | include ^hostname
+      register: hostname_output
+
+    - name: Stop if the target is not R3
+      ansible.builtin.assert:
+        that:
+          - "'hostname R3' in hostname_output.stdout[0]"
+        fail_msg: "Deployment aborted: target is not R3."
+        success_msg: "Production deployment target verified: R3."
+
+    - name: Apply configuration generated from the Source of Truth
+      cisco.ios.ios_config:
+        src: "{{ playbook_dir }}/../../generated/configs/R3.cfg"
+        match: line
+      register: interface_deployment
+
+    - name: Display deployment result
+      ansible.builtin.debug:
+        msg:
+          - "Environment: Production"
+          - "Target: R3"
+          - "Interface: GigabitEthernet1/0"
+          - "Configuration changed: {{ interface_deployment.changed }}"
+
+    - name: Verify production interface operational state
+      cisco.ios.ios_command:
+        commands:
+          - show ip interface brief
+      register: interface_status
+
+    - name: Assert production interface is up
+      ansible.builtin.assert:
+        that:
+          - "'GigabitEthernet1/0' in interface_status.stdout[0]"
+          - "'10.10.13.2' in interface_status.stdout[0]"
+          - "'up                    up' in interface_status.stdout[0]"
+        fail_msg: >-
+          Production verification failed.
+          Inspect R3 and initiate the approved recovery procedure.
+        success_msg: >-
+          Production deployment verified:
+          R3 GigabitEthernet1/0 is up/up.

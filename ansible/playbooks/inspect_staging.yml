@@ -1,0 +1,43 @@
+
+---
+- name: Read-only staging configuration inspection
+  hosts: staging
+  gather_facts: false
+
+  tasks:
+    - name: Verify expected hostname
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | include ^hostname
+      register: hostname_output
+
+    - name: Assert expected hostname
+      ansible.builtin.assert:
+        that:
+          - "'hostname R2' in hostname_output.stdout[0]"
+        fail_msg: "Inspection failed: expected R2."
+        success_msg: "Hostname verified: R2."
+
+    - name: Collect current staging interface state
+      cisco.ios.ios_command:
+        commands:
+          - show ip interface brief
+          - show running-config | section ^interface GigabitEthernet1/0
+      register: interface_output
+
+    - name: Display interface state and configuration
+      ansible.builtin.debug:
+        var: interface_output.stdout_lines
+
+    - name: Capture current configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config
+      register: current_config
+
+    - name: Save inspection snapshot locally
+      ansible.builtin.copy:
+        content: "{{ current_config.stdout[0] }}\n"
+        dest: "{{ playbook_dir }}/../../reports/R2-inspection.cfg"
+        mode: "0600"
+      delegate_to: localhost

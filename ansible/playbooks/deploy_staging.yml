@@ -1,0 +1,49 @@
+
+---
+- name: Deploy approved desired configuration to staging
+  hosts: staging
+  gather_facts: false
+
+  tasks:
+    - name: Verify target is the expected staging router
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | include ^hostname
+      register: hostname_output
+
+    - name: Stop if the target is not R2
+      ansible.builtin.assert:
+        that:
+          - "'hostname R2' in hostname_output.stdout[0]"
+        fail_msg: "Deployment aborted: target is not R2."
+        success_msg: "Deployment target verified: R2."
+
+    - name: Apply configuration generated from the Source of Truth
+      cisco.ios.ios_config:
+        src: "{{ playbook_dir }}/../../generated/configs/R2.cfg"
+        match: line
+      register: interface_deployment
+
+    - name: Display deployment result
+      ansible.builtin.debug:
+        msg:
+          - "Target: R2"
+          - "Interface: GigabitEthernet1/0"
+          - "Configuration changed: {{ interface_deployment.changed }}"
+
+    - name: Verify interface operational state
+      cisco.ios.ios_command:
+        commands:
+          - show ip interface brief
+      register: interface_status
+
+    - name: Assert staging interface is up
+      ansible.builtin.assert:
+        that:
+          - "'GigabitEthernet1/0' in interface_status.stdout[0]"
+          - "'10.10.12.2' in interface_status.stdout[0]"
+          - "'up                    up' in interface_status.stdout[0]"
+        fail_msg: >-
+          Staging verification failed. Inspect R2 immediately.
+        success_msg: >-
+          Staging deployment verified: GigabitEthernet1/0 is up/up.

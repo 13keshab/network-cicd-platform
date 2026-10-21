@@ -1,0 +1,242 @@
+
+name: Network CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "source_of_truth/**"
+      - "src/**"
+      - "ansible/**"
+      - "scripts/**"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/network-cicd.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Prevent overlapping deployments from competing for the same routers.
+concurrency:
+  group: network-cicd-main
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Validate Source of Truth
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, network-cicd]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify required tools
+        run: |
+          set -Eeuo pipefail
+          python --version
+          ansible-playbook --version
+
+      - name: Validate Source of Truth and run unit tests
+        run: |
+          set -Eeuo pipefail
+          chmod +x scripts/run_ci.sh
+          ./scripts/run_ci.sh
+
+      - name: Check staging playbooks
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook ansible/playbooks/backup_staging.yml \
+            -i generated/inventory/staging.yml --syntax-check
+          ansible-playbook ansible/playbooks/deploy_staging.yml \
+            -i generated/inventory/staging.yml --syntax-check
+
+      - name: Check production playbooks
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook ansible/playbooks/backup_production.yml \
+            -i generated/inventory/production.yml --syntax-check
+          ansible-playbook ansible/playbooks/deploy_production.yml \
+            -i generated/inventory/production.yml --syntax-check
+
+  deploy-staging:
+    name: Backup, Deploy and Verify Staging
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, network-cicd]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Generate and validate desired configuration
+        run: |
+          set -Eeuo pipefail
+          chmod +x scripts/run_ci.sh
+          ./scripts/run_ci.sh
+
+      - name: Backup staging configuration
+        env:
+          NETWORK_SSH_PASSWORD: ${{ secrets.NETWORK_SSH_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${NETWORK_SSH_PASSWORD:?NETWORK_SSH_PASSWORD secret is missing}"
+
+          SECRET_FILE="$(mktemp /tmp/network-cicd-secrets.XXXXXX.yml)"
+          trap 'rm -f "$SECRET_FILE"' EXIT
+          export SECRET_FILE
+
+          python - <<'PY'
+          import os
+          import yaml
+
+          with open(os.environ["SECRET_FILE"], "w") as f:
+              yaml.safe_dump(
+                  {"ansible_password": os.environ["NETWORK_SSH_PASSWORD"]},
+                  f
+              )
+          PY
+
+          ansible-playbook ansible/playbooks/backup_staging.yml \
+            -i generated/inventory/staging.yml \
+            -u ccna -e "@${SECRET_FILE}"
+
+      - name: Deploy and verify staging
+        env:
+          NETWORK_SSH_PASSWORD: ${{ secrets.NETWORK_SSH_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${NETWORK_SSH_PASSWORD:?NETWORK_SSH_PASSWORD secret is missing}"
+
+          SECRET_FILE="$(mktemp /tmp/network-cicd-secrets.XXXXXX.yml)"
+          trap 'rm -f "$SECRET_FILE"' EXIT
+          export SECRET_FILE
+
+          python - <<'PY'
+          import os
+          import yaml
+
+          with open(os.environ["SECRET_FILE"], "w") as f:
+              yaml.safe_dump(
+                  {"ansible_password": os.environ["NETWORK_SSH_PASSWORD"]},
+                  f
+              )
+          PY
+
+          ansible-playbook ansible/playbooks/deploy_staging.yml \
+            -i generated/inventory/staging.yml \
+            -u ccna -e "@${SECRET_FILE}"
+
+  deploy-production:
+    name: Approved Production Deployment
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, network-cicd]
+    timeout-minutes: 20
+
+    # Configure required reviewers in GitHub Settings > Environments.
+    # The job waits for approval before accessing environment secrets
+    # or starting its deployment steps.
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Generate and validate desired configuration
+        run: |
+          set -Eeuo pipefail
+          chmod +x scripts/run_ci.sh
+          ./scripts/run_ci.sh
+
+      - name: Backup production configuration
+        env:
+          NETWORK_SSH_PASSWORD: ${{ secrets.NETWORK_SSH_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${NETWORK_SSH_PASSWORD:?NETWORK_SSH_PASSWORD secret is missing}"
+
+          SECRET_FILE="$(mktemp /tmp/network-cicd-secrets.XXXXXX.yml)"
+          trap 'rm -f "$SECRET_FILE"' EXIT
+          export SECRET_FILE
+
+          python - <<'PY'
+          import os
+          import yaml
+
+          with open(os.environ["SECRET_FILE"], "w") as f:
+              yaml.safe_dump(
+                  {"ansible_password": os.environ["NETWORK_SSH_PASSWORD"]},
+                  f
+              )
+          PY
+
+          ansible-playbook ansible/playbooks/backup_production.yml \
+            -i generated/inventory/production.yml \
+            -u ccna -e "@${SECRET_FILE}"
+
+      - name: Deploy and verify production
+        env:
+          NETWORK_SSH_PASSWORD: ${{ secrets.NETWORK_SSH_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${NETWORK_SSH_PASSWORD:?NETWORK_SSH_PASSWORD secret is missing}"
+
+          SECRET_FILE="$(mktemp /tmp/network-cicd-secrets.XXXXXX.yml)"
+          trap 'rm -f "$SECRET_FILE"' EXIT
+          export SECRET_FILE
+
+          python - <<'PY'
+          import os
+          import yaml
+
+          with open(os.environ["SECRET_FILE"], "w") as f:
+              yaml.safe_dump(
+                  {"ansible_password": os.environ["NETWORK_SSH_PASSWORD"]},
+                  f
+              )
+          PY
+
+          ansible-playbook ansible/playbooks/deploy_production.yml \
+            -i generated/inventory/production.yml \
+            -u ccna -e "@${SECRET_FILE}"
