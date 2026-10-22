@@ -4,6 +4,9 @@
   hosts: staging
   gather_facts: false
 
+  vars_files:
+    - ../../generated/routing_intent.json
+
   tasks:
     - name: Verify target is the expected staging router
       cisco.ios.ios_command:
@@ -18,32 +21,70 @@
         fail_msg: "Deployment aborted: target is not R2."
         success_msg: "Deployment target verified: R2."
 
-    - name: Apply configuration generated from the Source of Truth
+    - name: Validate R2 routing intent exists
+      ansible.builtin.assert:
+        that:
+          - routing_intent is defined
+          - routing_intent['R2'] is defined
+          - routing_intent['R2']['ospf_enabled'] is boolean
+        fail_msg: "Deployment aborted: R2 routing intent is missing or invalid."
+
+    - name: Apply generated Source of Truth configuration to R2
       cisco.ios.ios_config:
-        src: "{{ playbook_dir }}/../../generated/configs/R2.cfg"
+        src: ../../generated/configs/R2.cfg
         match: line
-      register: interface_deployment
+        save_when: never
+      register: config_deployment
 
     - name: Display deployment result
       ansible.builtin.debug:
         msg:
           - "Target: R2"
-          - "Interface: GigabitEthernet1/0"
-          - "Configuration changed: {{ interface_deployment.changed }}"
+          - "Configuration changed: {{ config_deployment.changed }}"
+          - "Configuration source: generated/configs/R2.cfg"
 
-    - name: Verify interface operational state
+    - name: Verify staging interface operational state
       cisco.ios.ios_command:
         commands:
           - show ip interface brief
       register: interface_status
 
-    - name: Assert staging interface is up
+    - name: Assert staging interface is up/up with expected IP
       ansible.builtin.assert:
         that:
-          - "'GigabitEthernet1/0' in interface_status.stdout[0]"
-          - "'10.10.12.2' in interface_status.stdout[0]"
-          - "'up                    up' in interface_status.stdout[0]"
+          - >-
+            interface_status.stdout[0] is
+            regex('(?m)^GigabitEthernet1/0\s+10\.10\.12\.2\s+\S+\s+\S+\s+up\s+up\s*$')
         fail_msg: >-
-          Staging verification failed. Inspect R2 immediately.
+          Staging interface verification failed.
+          Expected GigabitEthernet1/0, 10.10.12.2, up/up.
+        success_msg: "R2 staging interface verification passed."
+
+    - name: Read OSPF configuration when explicitly enabled
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | section ^router ospf
+      register: ospf_config
+      when: routing_intent['R2']['ospf_enabled'] | bool
+
+    - name: Verify exact OSPF process and network statements
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('router ospf ' ~
+            (routing_intent['R2']['process_id'] | string))
+            in ospf_config.stdout[0]
+          - >-
+            item in ospf_config.stdout[0]
+        fail_msg: >-
+          R2 OSPF verification failed. The running configuration does not
+          contain the exact OSPF process or expected network statement.
         success_msg: >-
-          Staging deployment verified: GigabitEthernet1/0 is up/up.
+          R2 OSPF process and all expected network statements verified.
+      loop: "{{ routing_intent['R2']['network_statements'] }}"
+      when: routing_intent['R2']['ospf_enabled'] | bool
+
+    - name: Report that OSPF verification was intentionally skipped
+      ansible.builtin.debug:
+        msg: "R2 OSPF is disabled in the Source of Truth; no OSPF deployment is intended."
+      when: not (routing_intent['R2']['ospf_enabled'] | bool)

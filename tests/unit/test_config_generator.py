@@ -1,3 +1,4 @@
+from openpyxl import load_workbook
 from pathlib import Path
 
 from src.sot_processor.config_generator import (
@@ -24,11 +25,17 @@ def test_r2_interface_configuration_is_correct():
     assert " no shutdown" in r2_config
 
 
-def test_routing_protocol_commands_are_not_generated():
+def test_current_workbook_generates_ospf_for_r2_only():
     configs = build_device_configs(WORKBOOK)
 
+    assert "router ospf 10" in configs["R2"]
+    assert "network 10.10.12.0 0.0.0.3 area 0" in configs["R2"]
+
+    # Shared router R1 and production router R3 remain excluded from OSPF.
+    for device in ("R1", "R3"):
+        assert "router ospf" not in configs[device].lower()
+
     for config in configs.values():
-        assert "router ospf" not in config.lower()
         assert "router eigrp" not in config.lower()
         assert "router rip" not in config.lower()
 
@@ -62,3 +69,61 @@ def test_invalid_workbook_is_rejected(tmp_path):
         assert "Source of Truth validation failed" in str(exc)
     else:
         raise AssertionError("Invalid workbook should not generate configs")
+
+
+
+def test_enabled_ospf_generates_ios_commands_for_r2_only(tmp_path):
+    workbook_path = tmp_path / "enabled_ospf.xlsx"
+    workbook = load_workbook(WORKBOOK)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R2"
+            and str(sheet.cell(row, 2).value or "").lower() == "routing"
+            and str(sheet.cell(row, 3).value or "").lower() == "ospf"
+        ):
+            sheet.cell(row, 4).value = (
+                "process_id=10; area=0; network=10.10.12.0/30"
+            )
+            sheet.cell(row, 5).value = True
+            break
+
+    workbook.save(workbook_path)
+    workbook.close()
+
+    configs = build_device_configs(workbook_path)
+
+    assert "router ospf 10" in configs["R2"]
+    assert "network 10.10.12.0 0.0.0.3 area 0" in configs["R2"]
+    assert "router ospf" not in configs["R1"].lower()
+    assert "router ospf" not in configs["R3"].lower()
+
+
+def test_disabled_ospf_generates_no_routing_commands(tmp_path):
+    # Create a separate workbook with OSPF disabled; do not change the real SoT.
+    disabled_path = tmp_path / "ospf_disabled.xlsx"
+    workbook = load_workbook(WORKBOOK)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R2"
+            and str(sheet.cell(row, 2).value or "").strip().lower() == "routing"
+            and str(sheet.cell(row, 3).value or "").strip().lower() == "ospf"
+        ):
+            sheet.cell(row, 5).value = False
+            break
+    else:
+        workbook.close()
+        raise AssertionError("Could not find the R2 OSPF row")
+
+    workbook.save(disabled_path)
+    workbook.close()
+
+    configs = build_device_configs(disabled_path)
+
+    for config in configs.values():
+        assert "router ospf" not in config.lower()
+        assert "router eigrp" not in config.lower()
+        assert "router rip" not in config.lower()

@@ -282,8 +282,11 @@ def validate_workbook(workbook_path=WORKBOOK):
                     f"{endpoint_ips[0]}"
                 )
 
-        # 7. Routing must remain explicitly disabled at this stage.
+
+        # 7. Validate routing protocol intent.
+        # Only OSPF on R2/R3 may be enabled. R1 is shared infrastructure.
         allowed_protocols = {"ospf", "eigrp", "rip", "ripv2"}
+        routing_targets = {"R2", "R3"}
 
         for row in desired:
             feature = str(row.get("feature") or "").strip().lower()
@@ -292,7 +295,9 @@ def validate_workbook(workbook_path=WORKBOOK):
                 continue
 
             protocol = str(row.get("setting") or "").strip().lower()
-            device = row.get("device_name")
+            device = str(row.get("device_name") or "").strip()
+            value = str(row.get("value") or "").strip()
+            enabled = row.get("enabled")
 
             if protocol not in allowed_protocols:
                 errors.append(
@@ -304,10 +309,8 @@ def validate_workbook(workbook_path=WORKBOOK):
                 errors.append(
                     f"Routing configuration references unknown device {device!r}"
                 )
+                continue
 
-            enabled = row.get("enabled")
-
-            # Excel Boolean FALSE or numeric zero is explicitly disabled.
             explicitly_disabled = (
                 enabled is False
                 or (
@@ -317,11 +320,155 @@ def validate_workbook(workbook_path=WORKBOOK):
                 )
             )
 
-            if not explicitly_disabled:
-                errors.append(
-                    f"Routing protocol {protocol} must be explicitly disabled "
-                    f"for {device}; received {enabled!r}"
+            explicitly_enabled = (
+                enabled is True
+                or (
+                    isinstance(enabled, (int, float))
+                    and not isinstance(enabled, bool)
+                    and enabled == 1
                 )
+            )
+
+            if explicitly_disabled:
+                continue
+
+            if not explicitly_enabled:
+                errors.append(
+                    f"Routing protocol {protocol} must have an explicit "
+                    f"Boolean enabled value for {device}; received {enabled!r}"
+                )
+                continue
+
+            if device not in routing_targets:
+                errors.append(
+                    f"Routing deployment is prohibited on {device}; "
+                    "only R2 (staging) and R3 (production) are permitted"
+                )
+                continue
+
+            if protocol != "ospf":
+                errors.append(
+                    f"Enabled routing protocol {protocol} is not implemented; "
+                    "only OSPF is supported"
+                )
+                continue
+
+            # Parse the semicolon-separated OSPF settings.
+            settings = {}
+            for item in value.split(";"):
+                if "=" not in item:
+                    errors.append(
+                        f"Invalid OSPF setting {item!r} for {device}; "
+                        "expected key=value"
+                    )
+                    continue
+
+                key, setting_value = item.split("=", 1)
+                key = key.strip().lower()
+                setting_value = setting_value.strip()
+
+                if not key or not setting_value:
+                    errors.append(
+                        f"Empty OSPF setting key/value for {device}: {item!r}"
+                    )
+                    continue
+
+                if key in settings:
+                    errors.append(
+                        f"Duplicate OSPF setting {key!r} for {device}"
+                    )
+                    continue
+
+                settings[key] = setting_value
+
+            required_settings = {"process_id", "area", "network"}
+            missing_settings = required_settings - set(settings)
+            unknown_settings = set(settings) - required_settings
+
+            if missing_settings:
+                errors.append(
+                    f"Missing OSPF settings for {device}: "
+                    f"{', '.join(sorted(missing_settings))}"
+                )
+
+            if unknown_settings:
+                errors.append(
+                    f"Unknown OSPF settings for {device}: "
+                    f"{', '.join(sorted(unknown_settings))}"
+                )
+
+            if missing_settings or unknown_settings:
+                continue
+
+            try:
+                process_id = int(settings["process_id"])
+                if not 1 <= process_id <= 65535:
+                    raise ValueError
+            except ValueError:
+                errors.append(
+                    f"Invalid OSPF process_id for {device}: "
+                    f"{settings['process_id']!r}"
+                )
+
+            try:
+                area_text = settings["area"]
+                if "." in area_text:
+                    area = ip_address(area_text)
+                    if area.version != 4:
+                        raise ValueError
+                else:
+                    area_number = int(area_text)
+                    if not 0 <= area_number <= 4294967295:
+                        raise ValueError
+            except ValueError:
+                errors.append(
+                    f"Invalid OSPF area for {device}: {settings['area']!r}"
+                )
+
+            network_texts = [
+                item.strip()
+                for item in settings["network"].split(",")
+                if item.strip()
+            ]
+
+            if not network_texts:
+                errors.append(f"No OSPF networks specified for {device}")
+
+            parsed_networks = []
+            for network_text in network_texts:
+                try:
+                    network = ip_network(network_text, strict=True)
+                    if network.version != 4:
+                        raise ValueError
+                    parsed_networks.append(network)
+                except ValueError:
+                    errors.append(
+                        f"Invalid OSPF IPv4 network for {device}: "
+                        f"{network_text!r}; use canonical CIDR notation"
+                    )
+
+            # Prevent a workbook from advertising interfaces outside this
+            # device's explicitly defined transit subnets.
+            device_transit_networks = {
+                ip_network(f"{interface['ip_address']}/{interface['prefix_length']}",
+                           strict=False)
+                for interface in interfaces
+                if str(interface.get("device_name") or "").strip() == device
+                and str(interface.get("purpose") or "").strip().lower()
+                in {"staging_transit", "production_transit"}
+            }
+
+            for network in parsed_networks:
+                if not any(
+                    network.subnet_of(allowed_network)
+                    or allowed_network.subnet_of(network)
+                    for allowed_network in device_transit_networks
+                ):
+                    errors.append(
+                        f"OSPF network {network} for {device} does not match "
+                        "a defined transit subnet"
+                    )
+
 
     finally:
         workbook.close()
@@ -343,7 +490,7 @@ def main():
     print(" - Device names and management IPs are checked")
     print(" - Interface IPs and prefixes are checked")
     print(" - Link IDs, endpoints, and subnets are checked")
-    print(" - Routing protocols remain explicitly disabled")
+    print(" - Routing protocol intent and enabled settings are validated")
 
 
 if __name__ == "__main__":

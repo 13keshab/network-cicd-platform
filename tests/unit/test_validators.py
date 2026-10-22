@@ -109,30 +109,96 @@ def test_missing_required_worksheet_fails(tmp_path):
     assert errors, "The workbook should fail if the Links worksheet is missing"
 
 
-def test_enabled_routing_protocol_fails(tmp_path):
-    path = make_test_workbook(tmp_path, "routing_enabled.xlsx")
-    workbook = load_workbook(path)
 
+def test_valid_enabled_ospf_on_r2_passes(tmp_path):
+    path = make_test_workbook(tmp_path, "valid_ospf_r2.xlsx")
+    workbook = load_workbook(path)
     sheet = workbook["Desired_Config"]
-    found = False
 
     for row in range(2, sheet.max_row + 1):
+        device = sheet.cell(row, 1).value
         feature = str(sheet.cell(row, 2).value or "").strip().lower()
         setting = str(sheet.cell(row, 3).value or "").strip().lower()
 
-        if feature == "routing" or setting in {"ospf", "eigrp", "rip", "ripv2"}:
+        if device == "R2" and feature == "routing" and setting == "ospf":
+            sheet.cell(row, 4).value = (
+                "process_id=10; area=0; network=10.10.12.0/30"
+            )
             sheet.cell(row, 5).value = True
-            found = True
             break
 
     workbook.save(path)
     workbook.close()
 
-    assert found, "No routing configuration row was found in Desired_Config"
+    assert validate_workbook(path) == []
+
+
+def test_enabled_ospf_on_r1_is_rejected(tmp_path):
+    path = make_test_workbook(tmp_path, "ospf_r1.xlsx")
+    workbook = load_workbook(path)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R1"
+            and str(sheet.cell(row, 2).value or "").lower() == "routing"
+            and str(sheet.cell(row, 3).value or "").lower() == "ospf"
+        ):
+            sheet.cell(row, 5).value = True
+            break
+
+    workbook.save(path)
+    workbook.close()
 
     errors = validate_workbook(path)
+    assert any("prohibited on R1" in error for error in errors)
 
-    assert errors, "Routing must remain disabled during validation development"
+
+def test_enabled_eigrp_is_rejected(tmp_path):
+    path = make_test_workbook(tmp_path, "enabled_eigrp.xlsx")
+    workbook = load_workbook(path)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R2"
+            and str(sheet.cell(row, 2).value or "").lower() == "routing"
+            and str(sheet.cell(row, 3).value or "").lower() == "eigrp"
+        ):
+            sheet.cell(row, 5).value = True
+            break
+
+    workbook.save(path)
+    workbook.close()
+
+    errors = validate_workbook(path)
+    assert any("not implemented" in error for error in errors)
+
+
+def test_invalid_enabled_ospf_network_is_rejected(tmp_path):
+    path = make_test_workbook(tmp_path, "invalid_ospf_network.xlsx")
+    workbook = load_workbook(path)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R2"
+            and str(sheet.cell(row, 2).value or "").lower() == "routing"
+            and str(sheet.cell(row, 3).value or "").lower() == "ospf"
+        ):
+            sheet.cell(row, 4).value = (
+                "process_id=10; area=0; network=192.0.2.0/24"
+            )
+            sheet.cell(row, 5).value = True
+            break
+
+    workbook.save(path)
+    workbook.close()
+
+    errors = validate_workbook(path)
+    assert any("does not match a defined transit subnet" in error
+               for error in errors)
+
 
 def test_duplicate_link_id_fails(tmp_path):
     path = make_test_workbook(tmp_path, "duplicate_link.xlsx")

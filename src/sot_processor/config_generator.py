@@ -17,6 +17,58 @@ from src.sot_processor.validators import WORKBOOK, read_rows, validate_workbook
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "generated" / "configs"
 
 
+def build_ospf_commands(device, desired_rows):
+    """Generate OSPF IOS commands for an explicitly enabled routing row."""
+    commands = []
+
+    for row in desired_rows:
+        if str(row.get("device_name") or "").strip() != device:
+            continue
+        if str(row.get("feature") or "").strip().lower() != "routing":
+            continue
+        if str(row.get("setting") or "").strip().lower() != "ospf":
+            continue
+
+        enabled = row.get("enabled")
+        if not (
+            enabled is True
+            or (
+                isinstance(enabled, (int, float))
+                and not isinstance(enabled, bool)
+                and enabled == 1
+            )
+        ):
+            continue
+
+        settings = {}
+        for item in str(row.get("value") or "").split(";"):
+            key, value = item.split("=", 1)
+            settings[key.strip().lower()] = value.strip()
+
+        process_id = int(settings["process_id"])
+        area = settings["area"]
+        if "." in area:
+            area = str(ipaddress.IPv4Address(area))
+
+        networks = [
+            ipaddress.ip_network(item.strip(), strict=True)
+            for item in settings["network"].split(",")
+        ]
+
+        commands.append(f"router ospf {process_id}")
+        for network in networks:
+            wildcard = ipaddress.IPv4Address(
+                int(network.hostmask)
+            )
+            commands.append(
+                f" network {network.network_address} {wildcard} area {area}"
+            )
+        commands.append("!")
+
+    return commands
+
+
+
 def build_device_configs(workbook_path=WORKBOOK):
     """Return a dictionary mapping device names to IOS configuration text."""
     errors = validate_workbook(workbook_path)
@@ -101,8 +153,14 @@ def build_device_configs(workbook_path=WORKBOOK):
 
             lines.append("!")
 
-        # Routing commands are intentionally excluded in this stage.
+
+        # Add OSPF only when explicitly enabled in the validated workbook.
+        ospf_commands = build_ospf_commands(device, desired)
+        if ospf_commands:
+            lines.extend(ospf_commands)
+
         configs[device] = "\n".join(lines).rstrip() + "\n"
+
 
     return configs
 
@@ -148,7 +206,20 @@ def main():
         raise SystemExit(1) from exc
 
     print("CONFIGURATION GENERATION PASSED")
-    print("Routing protocol commands were not generated.")
+
+    routing_generated = any(
+        line.strip().lower().startswith(
+            ("router ospf ", "router eigrp ", "router rip")
+        )
+        for config in configs.values()
+        for line in config.splitlines()
+    )
+
+    if routing_generated:
+        print("Routing protocol commands were generated.")
+    else:
+        print("No routing protocol commands were generated.")
+
     for path in paths:
         print(f"Generated: {path}")
 

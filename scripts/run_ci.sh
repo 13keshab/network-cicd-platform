@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -17,7 +16,11 @@ echo "=== 3. Generate desired configuration artifacts ==="
 python src/sot_processor/config_generator.py
 
 echo
-echo "=== 4. Run unit tests ==="
+echo "=== 4. Export validated routing intent ==="
+python scripts/export_routing_intent.py
+
+echo
+echo "=== 5. Run unit tests ==="
 python -m pytest tests/unit -v
 
 echo
