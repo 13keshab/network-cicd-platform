@@ -35,9 +35,12 @@ def test_current_workbook_generates_ospf_for_r2_only():
     for device in ("R1", "R3"):
         assert "router ospf" not in configs[device].lower()
 
-    for config in configs.values():
-        assert "router eigrp" not in config.lower()
-        assert "router rip" not in config.lower()
+    assert "router eigrp 100" in configs["R2"]
+    assert "router eigrp 100" in configs["R3"]
+    assert "router rip" in configs["R2"].lower()
+    assert "router rip" in configs["R3"].lower()
+    assert "router eigrp" not in configs["R1"].lower()
+    assert "router rip" not in configs["R1"].lower()
 
 
 def test_config_files_are_written(tmp_path):
@@ -125,8 +128,6 @@ def test_disabled_ospf_generates_no_routing_commands(tmp_path):
 
     for config in configs.values():
         assert "router ospf" not in config.lower()
-        assert "router eigrp" not in config.lower()
-        assert "router rip" not in config.lower()
 
 
 def test_enabled_eigrp_generates_ios_commands(tmp_path):
@@ -159,7 +160,7 @@ def test_enabled_eigrp_generates_ios_commands(tmp_path):
     assert "router eigrp 100" in configs["R2"]
     assert "network 10.10.12.0 0.0.0.3" in configs["R2"]
     assert "router eigrp" not in configs["R1"].lower()
-    assert "router eigrp" not in configs["R3"].lower()
+    assert "router eigrp" in configs["R3"].lower()
 
 
 def test_enabled_ripv2_generates_ios_commands(tmp_path):
@@ -193,4 +194,4 @@ def test_enabled_ripv2_generates_ios_commands(tmp_path):
     assert " version 2" in configs["R2"].lower()
     assert " network 10.0.0.0" in configs["R2"].lower()
     assert "router rip" not in configs["R1"].lower()
-    assert "router rip" not in configs["R3"].lower()
+    assert "router rip" in configs["R3"].lower()

@@ -21,13 +21,18 @@ def test_current_workbook_exports_nested_routing_intent():
         "network 10.10.12.0 0.0.0.3 area 0"
     ]
 
-    # EIGRP and RIP remain disabled on R2.
-    assert routing["R2"]["eigrp"]["enabled"] is False
-    assert routing["R2"]["rip"]["enabled"] is False
+    # EIGRP and RIP are enabled on R2 in the current Source of Truth.
+    assert routing["R2"]["eigrp"]["enabled"] is True
+    assert routing["R2"]["eigrp"]["as_number"] == 100
+    assert routing["R2"]["rip"]["enabled"] is True
+    assert routing["R2"]["rip"]["version"] == 2
 
-    # All routing protocols remain disabled on R3.
-    for protocol in ("ospf", "eigrp", "rip"):
-        assert routing["R3"][protocol]["enabled"] is False
+    # R3 has EIGRP and RIP enabled, but OSPF remains disabled.
+    assert routing["R3"]["ospf"]["enabled"] is False
+    assert routing["R3"]["eigrp"]["enabled"] is True
+    assert routing["R3"]["eigrp"]["as_number"] == 100
+    assert routing["R3"]["rip"]["enabled"] is True
+    assert routing["R3"]["rip"]["version"] == 2
 
     assert routing["R3"]["ospf"]["process_id"] is None
     assert routing["R3"]["ospf"]["area"] is None
@@ -99,6 +104,9 @@ def test_enabled_eigrp_is_exported_with_network_statements(tmp_path):
         workbook.close()
         raise AssertionError("Could not find the R2 EIGRP row")
 
+    for row in range(2, sheet.max_row + 1):
+        if sheet.cell(row, 1).value == "R3" and str(sheet.cell(row, 3).value or "").strip().lower() == "eigrp":
+            sheet.cell(row, 5).value = False
     workbook.save(path)
     workbook.close()
 
@@ -136,6 +144,9 @@ def test_enabled_ripv2_is_exported_with_network_statements(tmp_path):
         workbook.close()
         raise AssertionError("Could not find the R2 RIP row")
 
+    for row in range(2, sheet.max_row + 1):
+        if sheet.cell(row, 1).value == "R3" and str(sheet.cell(row, 3).value or "").strip().lower() == "rip":
+            sheet.cell(row, 5).value = False
     workbook.save(path)
     workbook.close()
 
