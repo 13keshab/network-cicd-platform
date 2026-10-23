@@ -24,8 +24,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------
+  # JOB 1: Validate, test, generate and publish one artifact
+  # ---------------------------------------------------------
   ci:
-    name: Validate Source of Truth
+    name: Validate and Build Network Artifact
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, x64, network-cicd]
     timeout-minutes: 15
@@ -41,6 +44,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
+          set -Eeuo pipefail
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
@@ -50,7 +54,7 @@ jobs:
           python --version
           ansible-playbook --version
 
-      - name: Validate Source of Truth and run unit tests
+      - name: Validate Source of Truth and generate configuration
         run: |
           set -Eeuo pipefail
           chmod +x scripts/run_ci.sh
@@ -59,19 +63,67 @@ jobs:
       - name: Check staging playbooks
         run: |
           set -Eeuo pipefail
-          ansible-playbook ansible/playbooks/backup_staging.yml \
-            -i generated/inventory/staging.yml --syntax-check
-          ansible-playbook ansible/playbooks/deploy_staging.yml \
-            -i generated/inventory/staging.yml --syntax-check
+          ansible-playbook \
+            -i generated/inventory/staging.yml \
+            ansible/playbooks/backup_staging.yml \
+            --syntax-check
+
+          ansible-playbook \
+            -i generated/inventory/staging.yml \
+            ansible/playbooks/deploy_staging.yml \
+            --syntax-check
 
       - name: Check production playbooks
         run: |
           set -Eeuo pipefail
-          ansible-playbook ansible/playbooks/backup_production.yml \
-            -i generated/inventory/production.yml --syntax-check
-          ansible-playbook ansible/playbooks/deploy_production.yml \
-            -i generated/inventory/production.yml --syntax-check
+          ansible-playbook \
+            -i generated/inventory/production.yml \
+            ansible/playbooks/backup_production.yml \
+            --syntax-check
 
+          ansible-playbook \
+            -i generated/inventory/production.yml \
+            ansible/playbooks/deploy_production.yml \
+            --syntax-check
+
+      - name: Verify required artifact files
+        run: |
+          set -Eeuo pipefail
+          test -s generated/configs/R2.cfg
+          test -s generated/configs/R3.cfg
+          test -s generated/inventory/staging.yml
+          test -s generated/inventory/production.yml
+          test -s generated/routing_intent.json
+
+      - name: Create artifact checksum manifest
+        run: |
+          set -Eeuo pipefail
+          cd generated
+          sha256sum \
+            configs/R2.cfg \
+            configs/R3.cfg \
+            inventory/staging.yml \
+            inventory/production.yml \
+            routing_intent.json \
+            > SHA256SUMS
+
+      - name: Upload validated network configuration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-config-${{ github.sha }}
+          path: |
+            generated/configs/R2.cfg
+            generated/configs/R3.cfg
+            generated/inventory/staging.yml
+            generated/inventory/production.yml
+            generated/routing_intent.json
+            generated/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------
+  # JOB 2: Download artifact, back up and deploy to R2
+  # ---------------------------------------------------------
   deploy-staging:
     name: Backup, Deploy and Verify Staging
     needs: ci
@@ -83,6 +135,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Download validated network configuration artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: network-config-${{ github.sha }}
+          path: generated
+
+      - name: Verify downloaded artifact
+        run: |
+          set -Eeuo pipefail
+
+          test -s generated/configs/R2.cfg
+          test -s generated/configs/R3.cfg
+          test -s generated/inventory/staging.yml
+          test -s generated/inventory/production.yml
+          test -s generated/routing_intent.json
+          test -s generated/SHA256SUMS
+
+          cd generated
+          sha256sum -c SHA256SUMS
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -93,12 +165,6 @@ jobs:
           set -Eeuo pipefail
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-
-      - name: Generate and validate desired configuration
-        run: |
-          set -Eeuo pipefail
-          chmod +x scripts/run_ci.sh
-          ./scripts/run_ci.sh
 
       - name: Backup staging configuration
         env:
@@ -123,7 +189,8 @@ jobs:
               )
           PY
 
-          ansible-playbook ansible/playbooks/backup_staging.yml \
+          ansible-playbook \
+            ansible/playbooks/backup_staging.yml \
             -i generated/inventory/staging.yml \
             -u ccna -e "@${SECRET_FILE}"
 
@@ -150,10 +217,15 @@ jobs:
               )
           PY
 
-          ansible-playbook ansible/playbooks/deploy_staging.yml \
+          ansible-playbook \
+            ansible/playbooks/deploy_staging.yml \
             -i generated/inventory/staging.yml \
             -u ccna -e "@${SECRET_FILE}"
 
+  # ---------------------------------------------------------
+  # JOB 3: Wait for approval, then deploy the same artifact
+  #        to R3 only after staging succeeds
+  # ---------------------------------------------------------
   deploy-production:
     name: Approved Production Deployment
     needs: deploy-staging
@@ -161,14 +233,32 @@ jobs:
     runs-on: [self-hosted, linux, x64, network-cicd]
     timeout-minutes: 20
 
-    # Configure required reviewers in GitHub Settings > Environments.
-    # The job waits for approval before accessing environment secrets
-    # or starting its deployment steps.
+    # Configure required reviewers under GitHub Settings > Environments.
     environment: production
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download validated network configuration artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: network-config-${{ github.sha }}
+          path: generated
+
+      - name: Verify downloaded artifact
+        run: |
+          set -Eeuo pipefail
+
+          test -s generated/configs/R2.cfg
+          test -s generated/configs/R3.cfg
+          test -s generated/inventory/staging.yml
+          test -s generated/inventory/production.yml
+          test -s generated/routing_intent.json
+          test -s generated/SHA256SUMS
+
+          cd generated
+          sha256sum -c SHA256SUMS
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -180,12 +270,6 @@ jobs:
           set -Eeuo pipefail
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-
-      - name: Generate and validate desired configuration
-        run: |
-          set -Eeuo pipefail
-          chmod +x scripts/run_ci.sh
-          ./scripts/run_ci.sh
 
       - name: Backup production configuration
         env:
@@ -210,7 +294,8 @@ jobs:
               )
           PY
 
-          ansible-playbook ansible/playbooks/backup_production.yml \
+          ansible-playbook \
+            ansible/playbooks/backup_production.yml \
             -i generated/inventory/production.yml \
             -u ccna -e "@${SECRET_FILE}"
 
@@ -237,6 +322,7 @@ jobs:
               )
           PY
 
-          ansible-playbook ansible/playbooks/deploy_production.yml \
+          ansible-playbook \
+            ansible/playbooks/deploy_production.yml \
             -i generated/inventory/production.yml \
             -u ccna -e "@${SECRET_FILE}"

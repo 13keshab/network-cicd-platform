@@ -1,4 +1,3 @@
-
 ---
 - name: Deploy approved desired configuration to production
   hosts: production
@@ -26,7 +25,9 @@
         that:
           - routing_intent is defined
           - routing_intent['R3'] is defined
-          - routing_intent['R3']['ospf_enabled'] is boolean
+          - routing_intent['R3']['ospf']['enabled'] is boolean
+          - routing_intent['R3']['eigrp']['enabled'] is boolean
+          - routing_intent['R3']['rip']['enabled'] is boolean
         fail_msg: "Deployment aborted: R3 routing intent is missing or invalid."
 
     - name: Apply generated Source of Truth configuration to R3
@@ -42,6 +43,7 @@
           - "Environment: Production"
           - "Target: R3"
           - "Configuration changed: {{ config_deployment.changed }}"
+          - "Configuration source: generated/configs/R3.cfg"
 
     - name: Verify production interface operational state
       cisco.ios.ios_command:
@@ -60,31 +62,84 @@
           Expected GigabitEthernet1/0, 10.10.13.2, up/up.
         success_msg: "R3 production interface verification passed."
 
-    - name: Read OSPF configuration when explicitly enabled
+    - name: Read OSPF configuration
       cisco.ios.ios_command:
         commands:
           - show running-config | section ^router ospf
       register: ospf_config
-      when: routing_intent['R3']['ospf_enabled'] | bool
+      when: routing_intent['R3']['ospf']['enabled'] | bool
 
-    - name: Verify exact OSPF process and network statements
+    - name: Verify OSPF process and network statements
       ansible.builtin.assert:
         that:
           - >-
             ('router ospf ' ~
-            (routing_intent['R3']['process_id'] | string))
+            (routing_intent['R3']['ospf']['process_id'] | string))
             in ospf_config.stdout[0]
-          - >-
-            item in ospf_config.stdout[0]
+          - item in ospf_config.stdout[0]
         fail_msg: >-
           R3 OSPF verification failed. The running configuration does not
-          contain the exact OSPF process or expected network statement.
-        success_msg: >-
-          R3 OSPF process and all expected network statements verified.
-      loop: "{{ routing_intent['R3']['network_statements'] }}"
-      when: routing_intent['R3']['ospf_enabled'] | bool
+          contain the expected process or network statement.
+        success_msg: "R3 OSPF process and network statements verified."
+      loop: "{{ routing_intent['R3']['ospf']['network_statements'] }}"
+      when: routing_intent['R3']['ospf']['enabled'] | bool
 
-    - name: Report that OSPF verification was intentionally skipped
+    - name: Report disabled OSPF intent
       ansible.builtin.debug:
-        msg: "R3 OSPF is disabled in the Source of Truth; no OSPF deployment is intended."
-      when: not (routing_intent['R3']['ospf_enabled'] | bool)
+        msg: "R3 OSPF is disabled in the Source of Truth."
+      when: not (routing_intent['R3']['ospf']['enabled'] | bool)
+
+
+    # EIGRP verification
+    - name: Read EIGRP running configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | section ^router eigrp
+      register: eigrp_config
+      when: routing_intent['R3']['eigrp']['enabled'] | bool
+
+    - name: Verify EIGRP autonomous system and network statements
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('router eigrp ' ~
+            (routing_intent['R3']['eigrp']['as_number'] | string))
+            in eigrp_config.stdout[0]
+          - item in eigrp_config.stdout[0]
+        fail_msg: >-
+          R3 EIGRP verification failed. The running configuration does not
+          contain the expected AS number or network statement.
+        success_msg: "R3 EIGRP process and network statements verified."
+      loop: "{{ routing_intent['R3']['eigrp']['network_statements'] }}"
+      when: routing_intent['R3']['eigrp']['enabled'] | bool
+
+    - name: Report disabled EIGRP intent
+      ansible.builtin.debug:
+        msg: "R3 EIGRP is disabled in the Source of Truth."
+      when: not (routing_intent['R3']['eigrp']['enabled'] | bool)
+
+    # RIPv2 verification
+    - name: Read RIP running configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config | section ^router rip
+      register: rip_config
+      when: routing_intent['R3']['rip']['enabled'] | bool
+
+    - name: Verify RIP version and network statements
+      ansible.builtin.assert:
+        that:
+          - "'router rip' in rip_config.stdout[0]"
+          - "'version 2' in rip_config.stdout[0]"
+          - item in rip_config.stdout[0]
+        fail_msg: >-
+          R3 RIPv2 verification failed. The running configuration does not
+          contain the expected RIP version or network statement.
+        success_msg: "R3 RIPv2 version and network statements verified."
+      loop: "{{ routing_intent['R3']['rip']['network_statements'] }}"
+      when: routing_intent['R3']['rip']['enabled'] | bool
+
+    - name: Report disabled RIPv2 intent
+      ansible.builtin.debug:
+        msg: "R3 RIPv2 is disabled in the Source of Truth."
+      when: not (routing_intent['R3']['rip']['enabled'] | bool)

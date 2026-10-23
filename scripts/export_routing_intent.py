@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Export validated OSPF intent from the Excel Source of Truth for Ansible."""
+"""Export validated OSPF, EIGRP and RIPv2 intent from the Excel Source of Truth."""
 
 import argparse
+import ipaddress
 import json
 import sys
-import ipaddress
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +18,8 @@ from src.sot_processor.validators import (
     validate_workbook,
 )
 
-
 ALLOWED_TARGETS = {"R2", "R3"}
+PROTOCOLS = {"ospf", "eigrp", "rip", "ripv2"}
 
 
 def enabled(value):
@@ -31,8 +31,62 @@ def enabled(value):
     )
 
 
+def parse_settings(row, device, protocol):
+    """Parse semicolon-separated key=value settings."""
+    settings = {}
+
+    for item in str(row.get("value") or "").split(";"):
+        if "=" not in item:
+            raise ValueError(
+                f"Malformed {protocol.upper()} setting for {device}: {item!r}"
+            )
+
+        key, value = item.split("=", 1)
+        key, value = key.strip().lower(), value.strip()
+
+        if not key or not value or key in settings:
+            raise ValueError(
+                f"Invalid or duplicate {protocol.upper()} setting "
+                f"for {device}: {item!r}"
+            )
+
+        settings[key] = value
+
+    return settings
+
+
+def empty_protocol_intent():
+    """Return a consistent disabled protocol structure."""
+    return {
+        "enabled": False,
+        "networks": [],
+    }
+
+
+def empty_device_intent():
+    """Return all supported protocols disabled by default."""
+    return {
+        "ospf": {
+            **empty_protocol_intent(),
+            "process_id": None,
+            "area": None,
+            "network_statements": [],
+        },
+        "eigrp": {
+            **empty_protocol_intent(),
+            "as_number": None,
+            "network_statements": [],
+        },
+        "rip": {
+            **empty_protocol_intent(),
+            "version": 2,
+            "network_statements": [],
+        },
+    }
+
+
 def export_routing_intent(workbook_path=WORKBOOK):
-    """Return routing intent for permitted deployment targets."""
+    """Return validated routing intent for R2 and R3 only."""
     errors = validate_workbook(workbook_path)
     if errors:
         raise ValueError(
@@ -51,21 +105,9 @@ def export_routing_intent(workbook_path=WORKBOOK):
         workbook.close()
 
     result = {
-    "R2": {
-        "ospf_enabled": False,
-        "process_id": None,
-        "area": None,
-        "networks": [],
-        "network_statements": [],
-    },
-    "R3": {
-        "ospf_enabled": False,
-        "process_id": None,
-        "area": None,
-        "networks": [],
-        "network_statements": [],
-    },
-}
+        device: empty_device_intent()
+        for device in sorted(ALLOWED_TARGETS)
+    }
 
     for row in rows:
         if str(row.get("feature") or "").strip().lower() != "routing":
@@ -74,71 +116,133 @@ def export_routing_intent(workbook_path=WORKBOOK):
         device = str(row.get("device_name") or "").strip()
         protocol = str(row.get("setting") or "").strip().lower()
 
-        # R1 is deliberately excluded from exported deployment intent.
-        if device not in ALLOWED_TARGETS or protocol != "ospf":
+        # Never export deployment intent for R1 or unknown targets.
+        if device not in ALLOWED_TARGETS or protocol not in PROTOCOLS:
             continue
 
+        # Disabled protocols stay explicitly disabled in the JSON.
         if not enabled(row.get("enabled")):
             continue
 
-        settings = {}
-        for item in str(row.get("value") or "").split(";"):
-            if "=" not in item:
-                raise ValueError(
-                    f"Malformed OSPF setting for {device}: {item!r}"
-                )
-            key, value = item.split("=", 1)
-            key = key.strip().lower()
-            value = value.strip()
+        settings = parse_settings(row, device, protocol)
 
-            if not key or not value or key in settings:
-                raise ValueError(
-                    f"Invalid or duplicate OSPF setting for {device}: {item!r}"
-                )
-            settings[key] = value
+        if protocol == "ospf":
+            required = {"process_id", "area", "network"}
+        elif protocol == "eigrp":
+            required = {"as_number", "network"}
+        else:
+            required = {"version", "network"}
 
-        try:
+        if set(settings) != required:
+            missing = required - set(settings)
+            unknown = set(settings) - required
+            raise ValueError(
+                f"Invalid {protocol.upper()} settings for {device}; "
+                f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+            )
+
+        networks = [
+            item.strip()
+            for item in settings["network"].split(",")
+            if item.strip()
+        ]
+        if not networks:
+            raise ValueError(
+                f"No networks specified for enabled {protocol.upper()} on {device}"
+            )
+
+        if protocol == "ospf":
             process_id = int(settings["process_id"])
-            networks = [
-                item.strip()
-                for item in settings["network"].split(",")
-            ]
-            area = settings["area"].strip()
-            if not 1 <= process_id <= 65535 or not networks or any(
-                not network for network in networks
-            ) or not area:
-                raise ValueError("invalid process ID, area, or network list")
+            area = settings["area"]
 
-            network_statements = []
-            for network in networks:
-                parsed_network = ipaddress.ip_network(
-                    network, strict=False
+            if not 1 <= process_id <= 65535:
+                raise ValueError(f"Invalid OSPF process ID on {device}")
+
+            if "." in area:
+                if ipaddress.ip_address(area).version != 4:
+                    raise ValueError(f"Invalid OSPF area on {device}")
+            elif not 0 <= int(area) <= 4294967295:
+                raise ValueError(f"Invalid OSPF area on {device}")
+
+            statements = []
+            for network_text in networks:
+                network = ipaddress.ip_network(network_text, strict=True)
+                if network.version != 4:
+                    raise ValueError("Only IPv4 OSPF networks are supported")
+
+                wildcard = ipaddress.IPv4Address(int(network.hostmask))
+                statements.append(
+                    f"network {network.network_address} {wildcard} area {area}"
                 )
-                wildcard = ipaddress.IPv4Address(
-                    int(parsed_network.hostmask)
-                ) if parsed_network.version == 4 else None
 
-                if wildcard is None:
+            result[device]["ospf"] = {
+                "enabled": True,
+                "process_id": process_id,
+                "area": area,
+                "networks": networks,
+                "network_statements": statements,
+            }
+
+        elif protocol == "eigrp":
+            as_number = int(settings["as_number"])
+            if not 1 <= as_number <= 65535:
+                raise ValueError(f"Invalid EIGRP AS number on {device}")
+
+            statements = []
+            for network_text in networks:
+                network = ipaddress.ip_network(network_text, strict=True)
+                if network.version != 4:
+                    raise ValueError("Only IPv4 EIGRP networks are supported")
+
+                wildcard = ipaddress.IPv4Address(int(network.hostmask))
+                statements.append(
+                    f"network {network.network_address} {wildcard}"
+                )
+
+            result[device]["eigrp"] = {
+                "enabled": True,
+                "as_number": as_number,
+                "networks": networks,
+                "network_statements": statements,
+            }
+
+        else:
+            version = int(settings["version"])
+            if version != 2:
+                raise ValueError(f"Only RIPv2 is supported on {device}")
+
+            statements = []
+            for network_text in networks:
+                address = ipaddress.ip_address(network_text)
+                if address.version != 4:
+                    raise ValueError("Only IPv4 RIP networks are supported")
+
+                first = int(str(address).split(".")[0])
+                if not 1 <= first <= 223:
                     raise ValueError(
-                        "Only IPv4 OSPF network statements are supported"
+                        f"Invalid classful RIP network {network_text!r}"
                     )
 
-                network_statements.append(
-                    f"network {parsed_network.network_address} "
-                    f"{wildcard} area {area}"
+                prefix = 8 if first <= 126 else 16 if first <= 191 else 24
+                major_network = ipaddress.ip_network(
+                    f"{address}/{prefix}",
+                    strict=False,
                 )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Invalid enabled OSPF settings for {device}"
-            ) from exc
 
-        result[device] = {
-            "ospf_enabled": True,
-            "process_id": process_id,
-            "area": area,
-            "networks": networks,
-            "network_statements": network_statements,
-        }
+                if major_network.network_address != address:
+                    raise ValueError(
+                        f"RIP requires a classful major network address: "
+                        f"{network_text!r}"
+                    )
+
+                statements.append(f"network {major_network.network_address}")
+
+            result[device]["rip"] = {
+                "enabled": True,
+                "version": 2,
+                "networks": networks,
+                "network_statements": statements,
+            }
 
     return {"routing_intent": result}
 
@@ -173,8 +277,11 @@ def main():
         raise SystemExit(1) from exc
 
     print(f"ROUTING INTENT EXPORT PASSED: {args.output}")
+
     for device, data in intent["routing_intent"].items():
-        print(f"{device}: OSPF enabled = {data['ospf_enabled']}")
+        print(f"{device}:")
+        for protocol in ("ospf", "eigrp", "rip"):
+            print(f"  {protocol.upper()} enabled = {data[protocol]['enabled']}")
 
 
 if __name__ == "__main__":

@@ -284,14 +284,12 @@ def validate_workbook(workbook_path=WORKBOOK):
 
 
         # 7. Validate routing protocol intent.
-        # Only OSPF on R2/R3 may be enabled. R1 is shared infrastructure.
+        # R1 is shared infrastructure and is never an automation target.
         allowed_protocols = {"ospf", "eigrp", "rip", "ripv2"}
         routing_targets = {"R2", "R3"}
 
         for row in desired:
-            feature = str(row.get("feature") or "").strip().lower()
-
-            if feature != "routing":
+            if str(row.get("feature") or "").strip().lower() != "routing":
                 continue
 
             protocol = str(row.get("setting") or "").strip().lower()
@@ -300,174 +298,181 @@ def validate_workbook(workbook_path=WORKBOOK):
             enabled = row.get("enabled")
 
             if protocol not in allowed_protocols:
-                errors.append(
-                    f"Unknown routing protocol {protocol!r} on {device}"
-                )
+                errors.append(f"Unknown routing protocol {protocol!r} on {device}")
                 continue
-
             if device not in known_devices:
-                errors.append(
-                    f"Routing configuration references unknown device {device!r}"
-                )
+                errors.append(f"Routing configuration references unknown device {device!r}")
                 continue
 
-            explicitly_disabled = (
-                enabled is False
-                or (
-                    isinstance(enabled, (int, float))
-                    and not isinstance(enabled, bool)
-                    and enabled == 0
-                )
+            disabled = enabled is False or (
+                isinstance(enabled, (int, float))
+                and not isinstance(enabled, bool) and enabled == 0
+            )
+            enabled_ok = enabled is True or (
+                isinstance(enabled, (int, float))
+                and not isinstance(enabled, bool) and enabled == 1
             )
 
-            explicitly_enabled = (
-                enabled is True
-                or (
-                    isinstance(enabled, (int, float))
-                    and not isinstance(enabled, bool)
-                    and enabled == 1
-                )
-            )
-
-            if explicitly_disabled:
+            if disabled:
                 continue
-
-            if not explicitly_enabled:
+            if not enabled_ok:
                 errors.append(
-                    f"Routing protocol {protocol} must have an explicit "
-                    f"Boolean enabled value for {device}; received {enabled!r}"
+                    f"Routing protocol {protocol} on {device} must have "
+                    f"an explicit Boolean enabled value; got {enabled!r}"
                 )
                 continue
-
             if device not in routing_targets:
                 errors.append(
                     f"Routing deployment is prohibited on {device}; "
-                    "only R2 (staging) and R3 (production) are permitted"
+                    "only R2 and R3 are permitted"
                 )
                 continue
 
-            if protocol != "ospf":
-                errors.append(
-                    f"Enabled routing protocol {protocol} is not implemented; "
-                    "only OSPF is supported"
-                )
-                continue
-
-            # Parse the semicolon-separated OSPF settings.
             settings = {}
             for item in value.split(";"):
                 if "=" not in item:
-                    errors.append(
-                        f"Invalid OSPF setting {item!r} for {device}; "
-                        "expected key=value"
-                    )
+                    errors.append(f"Invalid {protocol.upper()} setting {item!r} on {device}")
                     continue
-
                 key, setting_value = item.split("=", 1)
                 key = key.strip().lower()
                 setting_value = setting_value.strip()
-
-                if not key or not setting_value:
+                if not key or not setting_value or key in settings:
                     errors.append(
-                        f"Empty OSPF setting key/value for {device}: {item!r}"
+                        f"Empty or duplicate {protocol.upper()} setting "
+                        f"{key!r} on {device}"
                     )
                     continue
-
-                if key in settings:
-                    errors.append(
-                        f"Duplicate OSPF setting {key!r} for {device}"
-                    )
-                    continue
-
                 settings[key] = setting_value
 
-            required_settings = {"process_id", "area", "network"}
-            missing_settings = required_settings - set(settings)
-            unknown_settings = set(settings) - required_settings
+            if protocol == "ospf":
+                required = {"process_id", "area", "network"}
+            elif protocol == "eigrp":
+                required = {"as_number", "network"}
+            else:
+                required = {"version", "network"}
 
-            if missing_settings:
+            missing = required - set(settings)
+            unknown = set(settings) - required
+            if missing:
                 errors.append(
-                    f"Missing OSPF settings for {device}: "
-                    f"{', '.join(sorted(missing_settings))}"
+                    f"Missing {protocol.upper()} settings on {device}: "
+                    f"{', '.join(sorted(missing))}"
                 )
-
-            if unknown_settings:
+            if unknown:
                 errors.append(
-                    f"Unknown OSPF settings for {device}: "
-                    f"{', '.join(sorted(unknown_settings))}"
+                    f"Unknown {protocol.upper()} settings on {device}: "
+                    f"{', '.join(sorted(unknown))}"
                 )
-
-            if missing_settings or unknown_settings:
+            if missing or unknown:
                 continue
 
-            try:
-                process_id = int(settings["process_id"])
-                if not 1 <= process_id <= 65535:
-                    raise ValueError
-            except ValueError:
-                errors.append(
-                    f"Invalid OSPF process_id for {device}: "
-                    f"{settings['process_id']!r}"
-                )
+            if protocol == "ospf":
+                try:
+                    if not 1 <= int(settings["process_id"]) <= 65535:
+                        raise ValueError
+                except ValueError:
+                    errors.append(f"Invalid OSPF process_id on {device}")
+                try:
+                    area = settings["area"]
+                    if "." in area:
+                        if ip_address(area).version != 4:
+                            raise ValueError
+                    elif not 0 <= int(area) <= 4294967295:
+                        raise ValueError
+                except ValueError:
+                    errors.append(f"Invalid OSPF area on {device}")
 
-            try:
-                area_text = settings["area"]
-                if "." in area_text:
-                    area = ip_address(area_text)
-                    if area.version != 4:
+            elif protocol == "eigrp":
+                try:
+                    if not 1 <= int(settings["as_number"]) <= 65535:
                         raise ValueError
-                else:
-                    area_number = int(area_text)
-                    if not 0 <= area_number <= 4294967295:
-                        raise ValueError
-            except ValueError:
-                errors.append(
-                    f"Invalid OSPF area for {device}: {settings['area']!r}"
-                )
+                except ValueError:
+                    errors.append(f"Invalid EIGRP AS number on {device}")
+
+            elif settings["version"] != "2":
+                errors.append(f"RIP on {device} must use version=2")
 
             network_texts = [
                 item.strip()
                 for item in settings["network"].split(",")
                 if item.strip()
             ]
-
             if not network_texts:
-                errors.append(f"No OSPF networks specified for {device}")
+                errors.append(f"No {protocol.upper()} networks specified on {device}")
+                continue
 
-            parsed_networks = []
+            transit_networks = set()
+            device_interfaces = []
+
+            for interface_row in interfaces:
+                if str(interface_row.get("device_name") or "").strip() != device:
+                    continue
+                try:
+                    iface = ip_interface(
+                        f"{str(interface_row['ip_address']).strip()}/"
+                        f"{int(interface_row['prefix_length'])}"
+                    )
+                except (ValueError, TypeError, KeyError):
+                    continue
+
+                purpose = str(interface_row.get("purpose") or "").strip().lower()
+                device_interfaces.append((iface.network, purpose))
+                if purpose in {"staging_transit", "production_transit"}:
+                    transit_networks.add(iface.network)
+
             for network_text in network_texts:
                 try:
-                    network = ip_network(network_text, strict=True)
-                    if network.version != 4:
-                        raise ValueError
-                    parsed_networks.append(network)
-                except ValueError:
+                    if protocol in {"ospf", "eigrp"}:
+                        network = ip_network(network_text, strict=True)
+                        if network.version != 4:
+                            raise ValueError("IPv4 network required")
+                    else:
+                        address = ip_address(network_text)
+                        if address.version != 4:
+                            raise ValueError("IPv4 required")
+                        first = int(network_text.split(".")[0])
+                        if not 1 <= first <= 223:
+                            raise ValueError("Invalid classful IPv4 network")
+                        prefix = 8 if first <= 126 else 16 if first <= 191 else 24
+                        network = ip_network(f"{address}/{prefix}", strict=False)
+                        if network.network_address != address:
+                            raise ValueError("Use the classful major network address")
+                except ValueError as exc:
                     errors.append(
-                        f"Invalid OSPF IPv4 network for {device}: "
-                        f"{network_text!r}; use canonical CIDR notation"
+                        f"Invalid {protocol.upper()} network on {device}: "
+                        f"{network_text!r} ({exc})"
                     )
+                    continue
 
-            # Prevent a workbook from advertising interfaces outside this
-            # device's explicitly defined transit subnets.
-            device_transit_networks = {
-                ip_network(f"{interface['ip_address']}/{interface['prefix_length']}",
-                           strict=False)
-                for interface in interfaces
-                if str(interface.get("device_name") or "").strip() == device
-                and str(interface.get("purpose") or "").strip().lower()
-                in {"staging_transit", "production_transit"}
-            }
-
-            for network in parsed_networks:
-                if not any(
-                    network.subnet_of(allowed_network)
-                    or allowed_network.subnet_of(network)
-                    for allowed_network in device_transit_networks
-                ):
-                    errors.append(
-                        f"OSPF network {network} for {device} does not match "
-                        "a defined transit subnet"
-                    )
+                if protocol in {"ospf", "eigrp"}:
+                    if not any(
+                        network.subnet_of(transit)
+                        or transit.subnet_of(network)
+                        for transit in transit_networks
+                    ):
+                        errors.append(
+                            f"{protocol.upper()} network {network} on {device} "
+                            "does not match a defined transit subnet"
+                        )
+                else:
+                    # RIP network statements can match multiple interfaces.
+                    unsafe = [
+                        str(iface_network)
+                        for iface_network, purpose in device_interfaces
+                        if (
+                            iface_network.network_address in network
+                            or network.network_address in iface_network
+                        )
+                        and purpose not in {
+                            "staging_transit", "production_transit"
+                        }
+                    ]
+                    if unsafe:
+                        errors.append(
+                            f"RIP network {network} on {device} also matches "
+                            "non-transit interface network(s): "
+                            f"{', '.join(unsafe)}"
+                        )
 
 
     finally:

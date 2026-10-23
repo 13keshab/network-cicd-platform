@@ -127,3 +127,70 @@ def test_disabled_ospf_generates_no_routing_commands(tmp_path):
         assert "router ospf" not in config.lower()
         assert "router eigrp" not in config.lower()
         assert "router rip" not in config.lower()
+
+
+def test_enabled_eigrp_generates_ios_commands(tmp_path):
+    workbook_path = tmp_path / "enabled_eigrp.xlsx"
+    workbook = load_workbook(WORKBOOK)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R2"
+            and str(sheet.cell(row, 2).value or "").strip().lower()
+            == "routing"
+            and str(sheet.cell(row, 3).value or "").strip().lower()
+            == "eigrp"
+        ):
+            sheet.cell(row, 4).value = (
+                "as_number=100; network=10.10.12.0/30"
+            )
+            sheet.cell(row, 5).value = True
+            break
+    else:
+        workbook.close()
+        raise AssertionError("Could not find the R2 EIGRP row")
+
+    workbook.save(workbook_path)
+    workbook.close()
+
+    configs = build_device_configs(workbook_path)
+
+    assert "router eigrp 100" in configs["R2"]
+    assert "network 10.10.12.0 0.0.0.3" in configs["R2"]
+    assert "router eigrp" not in configs["R1"].lower()
+    assert "router eigrp" not in configs["R3"].lower()
+
+
+def test_enabled_ripv2_generates_ios_commands(tmp_path):
+    workbook_path = tmp_path / "enabled_rip.xlsx"
+    workbook = load_workbook(WORKBOOK)
+    sheet = workbook["Desired_Config"]
+
+    for row in range(2, sheet.max_row + 1):
+        if (
+            sheet.cell(row, 1).value == "R2"
+            and str(sheet.cell(row, 2).value or "").strip().lower()
+            == "routing"
+            and str(sheet.cell(row, 3).value or "").strip().lower()
+            == "rip"
+        ):
+            sheet.cell(row, 4).value = (
+                "version=2; network=10.0.0.0"
+            )
+            sheet.cell(row, 5).value = True
+            break
+    else:
+        workbook.close()
+        raise AssertionError("Could not find the R2 RIP row")
+
+    workbook.save(workbook_path)
+    workbook.close()
+
+    configs = build_device_configs(workbook_path)
+
+    assert "router rip" in configs["R2"].lower()
+    assert " version 2" in configs["R2"].lower()
+    assert " network 10.0.0.0" in configs["R2"].lower()
+    assert "router rip" not in configs["R1"].lower()
+    assert "router rip" not in configs["R3"].lower()

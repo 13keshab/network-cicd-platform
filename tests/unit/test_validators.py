@@ -154,7 +154,8 @@ def test_enabled_ospf_on_r1_is_rejected(tmp_path):
     assert any("prohibited on R1" in error for error in errors)
 
 
-def test_enabled_eigrp_is_rejected(tmp_path):
+
+def test_valid_enabled_eigrp_on_r2_passes(tmp_path):
     path = make_test_workbook(tmp_path, "enabled_eigrp.xlsx")
     workbook = load_workbook(path)
     sheet = workbook["Desired_Config"]
@@ -162,17 +163,25 @@ def test_enabled_eigrp_is_rejected(tmp_path):
     for row in range(2, sheet.max_row + 1):
         if (
             sheet.cell(row, 1).value == "R2"
-            and str(sheet.cell(row, 2).value or "").lower() == "routing"
-            and str(sheet.cell(row, 3).value or "").lower() == "eigrp"
+            and str(sheet.cell(row, 2).value or "").strip().lower()
+            == "routing"
+            and str(sheet.cell(row, 3).value or "").strip().lower()
+            == "eigrp"
         ):
+            sheet.cell(row, 4).value = (
+                "as_number=100; network=10.10.12.0/30"
+            )
             sheet.cell(row, 5).value = True
             break
+    else:
+        workbook.close()
+        raise AssertionError("Could not find the R2 EIGRP row")
 
     workbook.save(path)
     workbook.close()
 
     errors = validate_workbook(path)
-    assert any("not implemented" in error for error in errors)
+    assert errors == [], f"Valid EIGRP intent was rejected: {errors}"
 
 
 def test_invalid_enabled_ospf_network_is_rejected(tmp_path):
