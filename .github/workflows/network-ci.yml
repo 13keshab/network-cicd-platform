@@ -1,0 +1,118 @@
+
+name: Network CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "source_of_truth/**"
+      - "src/**"
+      - "ansible/**"
+      - "scripts/**"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/network-ci.yml"
+      - ".github/workflows/network-cd.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-ci-main
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Validate and Build Network Artifact
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, network-cicd]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Python dependencies
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify required tools
+        run: |
+          set -Eeuo pipefail
+          python --version
+          ansible-playbook --version
+
+      - name: Validate Source of Truth and generate configuration
+        run: |
+          set -Eeuo pipefail
+          chmod +x scripts/run_ci.sh
+          ./scripts/run_ci.sh
+
+      - name: Check staging playbooks
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook \
+            -i generated/inventory/staging.yml \
+            ansible/playbooks/backup_staging.yml \
+            --syntax-check
+
+          ansible-playbook \
+            -i generated/inventory/staging.yml \
+            ansible/playbooks/deploy_staging.yml \
+            --syntax-check
+
+      - name: Check production playbooks
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook \
+            -i generated/inventory/production.yml \
+            ansible/playbooks/backup_production.yml \
+            --syntax-check
+
+          ansible-playbook \
+            -i generated/inventory/production.yml \
+            ansible/playbooks/deploy_production.yml \
+            --syntax-check
+
+      - name: Verify required artifact files
+        run: |
+          set -Eeuo pipefail
+          test -s generated/configs/R2.cfg
+          test -s generated/configs/R3.cfg
+          test -s generated/inventory/staging.yml
+          test -s generated/inventory/production.yml
+          test -s generated/routing_intent.json
+
+      - name: Create artifact checksum manifest
+        run: |
+          set -Eeuo pipefail
+          cd generated
+          sha256sum \
+            configs/R2.cfg \
+            configs/R3.cfg \
+            inventory/staging.yml \
+            inventory/production.yml \
+            routing_intent.json \
+            > SHA256SUMS
+
+      - name: Upload validated network configuration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-config-${{ github.sha }}
+          path: |
+            generated/configs/R2.cfg
+            generated/configs/R3.cfg
+            generated/inventory/staging.yml
+            generated/inventory/production.yml
+            generated/routing_intent.json
+            generated/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
